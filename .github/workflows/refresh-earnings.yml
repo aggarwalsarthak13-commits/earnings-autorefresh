@@ -1,0 +1,56 @@
+name: Refresh earnings.json
+
+# Rebuilds earnings.json from Sensibull and pushes it into the F&O Monitor Gist,
+# so the dashboard's Earnings column stays current even if nobody runs the Mac
+# script. Sensibull needs no account, so there is no broker login and no paid
+# data feed here — unlike the fade scanner, which needs Dhan's Data API.
+#
+# TRIGGERS ARE DELIBERATELY schedule + workflow_dispatch ONLY.
+# This repo is public. Pull requests from forks must never run this workflow,
+# because that is the one way a fork could reach GIST_TOKEN. Do not add
+# pull_request or pull_request_target here.
+
+on:
+  schedule:
+    # 02:45 UTC = 08:15 IST, daily, before the market opens.
+    # Sensibull confirms dates on its own cadence including weekends, so this
+    # runs every day rather than Mon-Fri. A no-op day costs one billed minute.
+    - cron: '45 2 * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Fetch and check, but push nothing'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  # Never let two runs push to the same Gist at once.
+  group: refresh-earnings
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Refresh and push earnings.json
+        env:
+          GIST_TOKEN: ${{ secrets.GIST_TOKEN }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          # Empty on a scheduled run, so the else branch is what the cron hits.
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          if [ "$DRY_RUN" = "true" ]; then
+            python3 scripts/refresh_earnings_cloud.py --dry-run
+          else
+            python3 scripts/refresh_earnings_cloud.py
+          fi
