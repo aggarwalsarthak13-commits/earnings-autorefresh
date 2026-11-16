@@ -7,9 +7,9 @@ refresh locally, the dashboard's Earnings column stays current anyway.
 Same shape as `fade-cloud`: a cron'd GitHub Actions workflow, a token in repo
 secrets, a Discord ping when it fails.
 
-**Earnings only.** `deploy_gate.json` cannot run here — it needs the local
-575-symbol OHLC cache and a Kite token that expires every day. That stays on the
-Mac as `python3 refresh_gate.py`.
+**Also the deploy gate.** A second workflow, `refresh-deploy-gate.yml`, rebuilds
+`deploy_gate.json` every weekday evening from NSE's free end-of-day files. No Kite
+login and no Mac. See [Deploy gate](#deploy-gate) below.
 
 ---
 
@@ -176,8 +176,60 @@ changes. Never commit it to the repo — this repo is public.
 
 ---
 
+## Deploy gate
+
+`scripts/deploy_gate_cloud.py`, run by `.github/workflows/refresh-deploy-gate.yml`.
+
+**When:** 19:00 IST Mon–Fri, plus a 07:00 IST catch-up Tue–Sat. GitHub often starts
+scheduled runs late (the earnings job fires hours after its slot), which is harmless
+here. A run that finds nothing new pushes nothing.
+
+**What it computes.** The same rule and file as the Mac's `deploy_gate.py`:
+- `med_stock_vs200`: the median, across the current Nifty 500 list, of each stock's
+  close vs its own 200-day simple average.
+- `nifty_dd`: Nifty 50 vs its trailing 252-day high.
+- The bands, `to_next`, `warn_days` and the JSON keys are copied from `deploy_gate.py`.
+
+**Data:** NSE's CM bhavcopy plus the daily index-close file, from `nsearchives.nseindia.com`.
+About 320 trading days of closes are kept in the Actions cache. On a cache miss
+(the first run, or 7 days with no run) the script rebuilds them from NSE's archive,
+which takes a couple of minutes.
+
+**Splits and bonuses.** NSE's files are not adjusted for these. An opening gap
+below −21% is treated as a corporate action and snapped to the nearest standard
+ratio (1/2, 1/5, 3/4 …), or the gap itself is used for a demerger, and that
+stock's history is scaled. Checked against TradingView's 200-day averages for 488
+Nifty-500 stocks: median difference 0.08%, worst 1.6%.
+
+**How it compares with the Mac version** (same closing dates):
+
+| Date | Mac | Cloud | Nifty dd Mac / cloud |
+|---|---|---|---|
+| 15 Sep | −2.17 | −1.28 | −12.2 / −12.2 |
+| 25 Sep | −1.56 | −0.33 | −12.1 / −12.1 |
+| 1 Oct | −4.50 | −3.92 | −14.8 / −14.8 |
+| 9 Oct | −5.19 | −4.48 | −14.5 / −14.5 |
+| 23 Oct | −9.10 | −8.51 | −14.2 / −14.2 |
+| 28 Oct | −7.57 | −7.05 | −13.8 / −13.8 |
+
+The Nifty drawdown matches exactly. The median reads 0.5–1.2pp less negative than
+the Mac's. The Mac's panel has 573 symbols, while this uses the 500 names on
+NSE's current Nifty 500 list. TradingView agrees with the cloud figure for
+13 Nov: −0.34 vs −0.29.
+
+**Guards.** It refuses to push, and posts to Discord, if any day fails to download
+(it never skips over a hole), if fewer than 400 stocks have 200 days of history,
+or if the value isn't valid JSON. It never overwrites a Gist file with a newer
+`as_of`. Only `deploy_gate.json` is touched.
+
+**Run by hand:** Actions → Refresh deploy_gate.json → Run workflow (tick `dry_run`
+to see the number without pushing, `force` to re-push the same date).
+
+**Tests:** `python3 tests/test_deploy_gate_cloud.py` (offline).
+
+---
+
 ## What still needs you
 
-- `deploy_gate.json` — `python3 refresh_gate.py` on the Mac (needs the Kite token).
 - `option-monitor.js` — code changes only, `preflight_gist.py` first, pasted
   deliberately. Nothing automated ever writes that file.

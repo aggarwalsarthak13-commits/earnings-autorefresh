@@ -1,0 +1,75 @@
+name: Refresh deploy_gate.json
+
+# Computes the lump-sum deploy gate (median Nifty-500 stock vs its own 200 DMA,
+# plus the Nifty's drop from its 52-week high) from NSE's free end-of-day files
+# and pushes deploy_gate.json into the F&O Monitor Gist. No Kite login, no Mac.
+#
+# TRIGGERS ARE DELIBERATELY schedule + workflow_dispatch ONLY.
+# This repo is public. Pull requests from forks must never run this workflow,
+# because that is the one way a fork could reach GIST_TOKEN. Do not add
+# pull_request or pull_request_target here.
+
+on:
+  schedule:
+    # 13:30 UTC = 19:00 IST, Mon-Fri, after NSE publishes the day's files.
+    - cron: '30 13 * * 1-5'
+    # 01:30 UTC = 07:00 IST, Tue-Sat: catch-up if last evening's run was late,
+    # failed, or NSE published after it. A run with nothing new pushes nothing.
+    - cron: '30 1 * * 2-6'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Fetch and compute, but push nothing'
+        type: boolean
+        default: false
+      force:
+        description: 'Push even if the Gist already has this date'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: refresh-deploy-gate
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # ~320 trading days of closes, kept between runs in the Actions cache.
+      # On a miss (first run, or 7 days without a run) the script rebuilds it
+      # from NSE's archive in a couple of minutes.
+      - name: Restore price history
+        uses: actions/cache/restore@v4
+        with:
+          path: state/gate_state.json.gz
+          key: gate-state-v1-${{ github.run_id }}
+          restore-keys: gate-state-v1-
+
+      - name: Compute and push deploy_gate.json
+        env:
+          GIST_TOKEN: ${{ secrets.GIST_TOKEN }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          args="--state state/gate_state.json.gz --out deploy_gate.json"
+          [ "$DRY_RUN" = "true" ] && args="$args --dry-run"
+          [ "$FORCE" = "true" ] && args="$args --force"
+          python3 scripts/deploy_gate_cloud.py $args
+
+      - name: Save price history
+        if: success()
+        uses: actions/cache/save@v4
+        with:
+          path: state/gate_state.json.gz
+          key: gate-state-v1-${{ github.run_id }}
