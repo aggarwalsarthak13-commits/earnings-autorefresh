@@ -119,16 +119,26 @@ A name that already reported falling off is housekeeping. A name still due to
 report disappearing is the dangerous case — that is a position whose earnings
 warning silently vanishes from the dashboard.
 
-Four other refusals, all tested:
+Refusals, all tested:
 
 | Refuses | Why |
 |---|---|
-| New map is empty while the live one isn't | Sensibull outage would blank the whole Earnings column |
+| New map is empty while a live name is still due to report | Sensibull outage would blank warnings you still need |
+| New map is empty and Sensibull no longer accepts `stock_results` | The API changed; a renamed type would otherwise look like a quiet calendar forever |
 | A future-dated name is lost | The real failure mode (above) |
 | The Gist copy is newer than this run | Another writer got there first; don't clobber it |
 | Push reported success but the Gist content doesn't match | Re-reads after writing, every time |
 
 `--force` overrides the guard. `--dry-run` skips the push entirely.
+
+**An empty map is normal between results seasons.** After each quarterly deadline
+(14 Nov, 14 Feb, 30 May, 14 Aug) Sensibull can have no results dates for weeks.
+If every live name has already reported, the empty map is pushed and the
+Earnings column goes blank, which is correct. Before pushing, the script checks
+that Sensibull still accepts `stock_results` as an event type: an unknown type
+gets HTTP 422 with the list of valid types, so an API rename fails loudly
+instead of passing as a quiet calendar. (Until 2026-11-19 any empty map was
+refused, which sent a false alarm every day after the November season ended.)
 
 **You still need to fix the Mac copy.** `push_gist.py` has the total-count guard
 and will refuse today's legitimate refresh. Either port the forward-looking check
@@ -164,6 +174,7 @@ an argument — an argument lands in your shell history and in `ps`.
 | `push failed HTTP 401` | Token expired or revoked | New fine-grained token, Gists read+write, update the secret |
 | `push failed HTTP 404` | Token belongs to a different GitHub account than the Gist | Regenerate under `aggarwalsarthak13-commits` |
 | `would DROP n name(s)` | Either a genuine Sensibull regression, or a name genuinely got cancelled | Read the names in the log. If the drop is real, `--force` once |
+| `no longer accepts 'stock_results'` | Sensibull renamed or removed the results event type | The 422 text in the log lists the types it now accepts; update `RESULTS_TYPE` |
 | Nothing runs at all | Cron disabled after 60 days idle, or Actions turned off for the repo | Actions tab will say so; click Run workflow |
 
 ---

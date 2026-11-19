@@ -27,6 +27,22 @@ file actually had MORE of them (71 vs 64).
 Losing a name that has already reported is housekeeping. Losing a name that is
 still due to report is the dangerous case, because that is a position whose
 earnings warning silently disappears. So that is what this guard checks.
+
+AN EMPTY MAP IS NORMAL BETWEEN RESULTS SEASONS
+----------------------------------------------
+After the quarterly deadline (14 Nov, 14 Feb, 30 May, 14 Aug) Sensibull can have
+no results dates at all for weeks. On 2026-11-17 and -18 it returned 0 results
+and 4 dividends, and the old guard refused because the live file still held 8
+names. All 8 had reported on 13-14 Nov, so nothing still ahead would have been
+lost. The guard sent a false alarm every day.
+
+An empty map is now pushed when (a) no live name is still due to report and
+(b) Sensibull still accepts `stock_results` as an event type. Check (b) is one
+extra call made only on empty days. It sends `event_types: ["stock_results"]`,
+and Sensibull answers an unknown type with HTTP 422 and the list of types it
+does accept. So if they rename or drop it, the run fails loudly. Without (b), a
+renamed type would look exactly like a quiet calendar, and every later push
+would be an empty map.
 """
 
 import argparse
@@ -58,11 +74,12 @@ HEADERS = {
 # Sensibull clamps the window to its own available_end_date, so asking wide is
 # free — it returns what it has and reports the real bounds back.
 LOOKAHEAD_DAYS = 90
+RESULTS_TYPE = "stock_results"
 
 
 # ---------------------------------------------------------------- Sensibull
 
-def fetch(days_ahead):
+def _session():
     jar = http.cookiejar.CookieJar()
     opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
 
@@ -73,22 +90,54 @@ def fetch(days_ahead):
     token = next((c.value for c in jar if c.name == "access_token"), None)
     if not token:
         raise RuntimeError("no access_token cookie — identify endpoint changed?")
+    return opener, token
 
+
+def _events(opener, token, days_ahead, event_types=None):
     today = dt.date.today()
-    body = json.dumps({
+    body = {
         "start_date": today.isoformat(),
         "end_date": (today + dt.timedelta(days=days_ahead)).isoformat(),
-    }).encode()
+    }
+    if event_types:
+        body["event_types"] = event_types
 
     headers = dict(HEADERS)
     headers["Authorization"] = "Bearer " + token
-    req = urllib.request.Request(EVENTS, data=body, headers=headers, method="POST")
-    with opener.open(req, timeout=30) as r:
-        payload = json.load(r)
+    req = urllib.request.Request(EVENTS, data=json.dumps(body).encode(),
+                                 headers=headers, method="POST")
+    try:
+        with opener.open(req, timeout=30) as r:
+            payload = json.load(r)
+    except urllib.error.HTTPError as e:
+        detail = e.read()[:400].decode("utf-8", "replace")
+        raise RuntimeError("events call HTTP %s: %s" % (e.code, detail))
 
     if not payload.get("success"):
         raise RuntimeError("events call failed: %s" % payload.get("errors"))
     return payload["payload"]
+
+
+def fetch(days_ahead):
+    opener, token = _session()
+    return _events(opener, token, days_ahead)
+
+
+def confirm_results_type(days_ahead):
+    """Raise unless Sensibull still accepts RESULTS_TYPE as an event type.
+
+    Called only when the results map is empty, to tell a quiet calendar from
+    a renamed or removed type. Sensibull rejects an unknown type with HTTP 422
+    and lists the types it does accept.
+    """
+    opener, token = _session()
+    try:
+        _events(opener, token, days_ahead, event_types=[RESULTS_TYPE])
+    except RuntimeError as e:
+        raise RuntimeError("0 results returned AND Sensibull no longer accepts "
+                           "'%s' as an event type, so the API has changed. "
+                           "Not blanking the Earnings column. %s"
+                           % (RESULTS_TYPE, e))
 
 
 def build(p):
@@ -115,17 +164,42 @@ def read_live():
         return None
 
 
+def future(m, today=None):
+    """Symbols in an earnings map whose date is today or later."""
+    today = today or dt.date.today()
+    out = set()
+    for s, d in m.items():
+        try:
+            if dt.date.fromisoformat(d) >= today:
+                out.add(s)
+        except (TypeError, ValueError):
+            pass
+    return out
+
+
 def guard(new, live, force):
-    """Return (ok, reason). Refuses a push that would lose information."""
-    today = dt.date.today()
+    """Return (ok, reason). Refuses a push that would lose information.
+
+    An empty new map is allowed only when no live name is still due to
+    report. main() has already checked that Sensibull still accepts the
+    results event type.
+    """
     nn = new["earnings"]
+    live_map = (live or {}).get("earnings") or {}
 
     if not nn:
-        if live and live.get("earnings"):
-            return False, ("Sensibull returned an EMPTY map while the live file has "
-                           "%d entries. That blanks the Earnings column — refusing."
-                           % len(live["earnings"]))
-        print("  empty map, and the live copy is empty too — nothing is lost")
+        ahead = sorted(future(live_map))
+        if ahead:
+            return False, ("Sensibull returned an EMPTY map while %d live name(s) "
+                           "are still due to report (%s). That blanks their "
+                           "earnings warnings, so refusing."
+                           % (len(ahead), ", ".join(ahead[:12])))
+        if live_map:
+            print("  empty map: no results dates in Sensibull's window. All %d live "
+                  "entries have already reported, so nothing still ahead is lost"
+                  % len(live_map))
+        else:
+            print("  empty map, and the live copy is empty too, so nothing is lost")
 
     if not live:
         return True, "no live copy to compare against"
@@ -136,17 +210,7 @@ def guard(new, live, force):
         return False, ("the Gist copy is NEWER (%s) than this run (%s) — refusing"
                        % (lts, nts))
 
-    def future(m):
-        out = set()
-        for s, d in m.items():
-            try:
-                if dt.date.fromisoformat(d) >= today:
-                    out.add(s)
-            except ValueError:
-                pass
-        return out
-
-    lost = sorted(future(live.get("earnings", {})) - set(nn))
+    lost = sorted(future(live_map) - set(nn))
     print("  live on Gist : %s   %d entries (%d still ahead)"
           % (lts or "?", len(live.get("earnings", {})), len(future(live.get("earnings", {})))))
     print("  this run     : %s   %d entries (%d still ahead)"
@@ -203,10 +267,21 @@ def main():
                     help="push even if the guard objects")
     args = ap.parse_args()
 
-    blob = build(fetch(args.days))
+    raw = fetch(args.days)
+    blob = build(raw)
     text = json.dumps(blob, separators=(",", ":"))
 
     n = len(blob["earnings"])
+    if n == 0:
+        other = {}
+        for e in raw.get("data", []):
+            other[e.get("event_type")] = other.get(e.get("event_type"), 0) + 1
+        print("0 results in Sensibull's window; other events returned: %s"
+              % (", ".join("%d %s" % (c, t) for t, c in sorted(other.items()))
+                 or "none"))
+        confirm_results_type(args.days)
+        print("  Sensibull still accepts '%s' as an event type, so this is a "
+              "quiet calendar, not an API change" % RESULTS_TYPE)
     by_date = {}
     for sym, d in blob["earnings"].items():
         by_date.setdefault(d, []).append(sym)
